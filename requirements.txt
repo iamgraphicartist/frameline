@@ -1,0 +1,5 @@
+PySide6-Essentials>=6.7
+av>=13
+numpy
+sounddevice
+pyinstaller>=6

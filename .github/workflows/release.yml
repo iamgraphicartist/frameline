@@ -1,0 +1,113 @@
+# Builds Frameline for Windows and macOS. Push a tag like v1.0.1 to publish a release with the downloads.
+name: Build & Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Version
+        id: v
+        shell: bash
+        run: echo "version=$(python -c 'import frameline; print(frameline.__version__)')" >> "$GITHUB_OUTPUT"
+      - name: Build app
+        shell: pwsh
+        run: .\build.ps1 -Python python
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $env:FRAMELINE_SELFTEST = "$PWD\selftest.png"
+          $p = Start-Process dist\Frameline.exe -PassThru
+          if (-not $p.WaitForExit(90000)) { $p.Kill(); throw "app did not exit" }
+          if (-not (Test-Path selftest.png)) { throw "no screenshot" }
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc /DAppVersion=${{ steps.v.outputs.version }} installer\frameline.iss
+          if ($LASTEXITCODE -ne 0) { throw "installer build failed" }
+          Copy-Item dist\Frameline.exe dist\Frameline-${{ steps.v.outputs.version }}-Windows-Portable.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/Frameline-Setup-*.exe
+            dist/Frameline-*-Portable.exe
+      - name: Publish to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Frameline-Setup-*.exe
+            dist/Frameline-*-Portable.exe
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: AppleSilicon
+          - runner: macos-15-intel
+            arch: Intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Version
+        id: v
+        run: echo "version=$(python -c 'import frameline; print(frameline.__version__)')" >> "$GITHUB_OUTPUT"
+      - name: Icon
+        run: |
+          python build_assets/make_icon.py
+          iconutil -c icns build_assets/frameline.iconset -o build_assets/frameline.icns
+      - name: Build app
+        run: |
+          python -m PyInstaller --noconfirm --clean --windowed --onedir \
+            --name Frameline --icon "$PWD/build_assets/frameline.icns" \
+            --osx-bundle-identifier com.miguelrato.frameline \
+            --collect-binaries av --collect-data sounddevice --hidden-import sounddevice \
+            --exclude-module tkinter --exclude-module matplotlib \
+            --workpath build --specpath build run.py
+          python build_assets/mac_plist.py dist/Frameline.app ${{ steps.v.outputs.version }}
+          codesign --force --deep --sign - dist/Frameline.app
+      - name: Smoke test
+        run: |
+          FRAMELINE_SELFTEST="$PWD/selftest.png" QT_QPA_PLATFORM=offscreen dist/Frameline.app/Contents/MacOS/Frameline &
+          pid=$!
+          for i in $(seq 1 90); do kill -0 $pid 2>/dev/null || break; sleep 1; done
+          kill $pid 2>/dev/null || true
+          test -f selftest.png
+      - name: Make DMG
+        run: |
+          mkdir -p dmg
+          cp -R dist/Frameline.app dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname Frameline -srcfolder dmg -ov -format UDZO "dist/Frameline-${{ steps.v.outputs.version }}-macOS-${{ matrix.arch }}.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/*.dmg
+      - name: Publish to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dmg
