@@ -13,6 +13,7 @@ IMAGE_EXTS = (".exr", ".dpx", ".tif", ".tiff")
 SESSION_EXT = ".flsession"
 PROGID = "Frameline.Media"
 APP_NAME = "Frameline"
+EXPLORER_EXTS = r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts"
 
 
 def _command():
@@ -52,6 +53,9 @@ def register_windows():
         setv(rf"Software\Classes\{e}\OpenWithProgids", PROGID, "")
         setv(app + r"\SupportedTypes", e, "")
         setv(caps + r"\FileAssociations", e, PROGID)
+        # Explorer's per-user list is what the "Select a default app" picker reads
+        with winreg.CreateKeyEx(C, EXPLORER_EXTS + rf"\{e}\OpenWithProgids", 0, winreg.KEY_WRITE) as k:
+            winreg.SetValueEx(k, PROGID, 0, winreg.REG_NONE, b"")
     setv(r"Software\RegisteredApplications", APP_NAME, caps)
     # .flsession files are ours alone: claim them outright
     setv(rf"Software\Classes\{SESSION_EXT}", "", PROGID)
@@ -97,11 +101,12 @@ def unregister_windows():
             pass
 
     for e in VIDEO_EXTS + IMAGE_EXTS + (SESSION_EXT,):
-        try:
-            with winreg.OpenKey(C, rf"Software\Classes\{e}\OpenWithProgids", 0, winreg.KEY_WRITE) as k:
-                winreg.DeleteValue(k, PROGID)
-        except OSError:
-            pass
+        for path in (rf"Software\Classes\{e}\OpenWithProgids", EXPLORER_EXTS + rf"\{e}\OpenWithProgids"):
+            try:
+                with winreg.OpenKey(C, path, 0, winreg.KEY_WRITE) as k:
+                    winreg.DeleteValue(k, PROGID)
+            except OSError:
+                pass
     try:
         with winreg.OpenKey(C, r"Software\RegisteredApplications", 0, winreg.KEY_WRITE) as k:
             winreg.DeleteValue(k, APP_NAME)
