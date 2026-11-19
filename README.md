@@ -1,4 +1,4 @@
-<p align="center"><img src="build_assets/frameline.png" width="128" alt="Frameline icon"></p>
+<p align="center"><img src="docs/social-preview.png" alt="Frameline: frame-accurate media player and review tool for animation and VFX"></p>
 
 # Frameline
 
@@ -6,6 +6,16 @@ A frame-accurate media player and review tool for animation and VFX, with a macO
 Runs on Windows and macOS.
 
 **Designed and built by Miguel Rato.**
+
+<p align="center"><img src="docs/screenshots/main.png" alt="Frameline playing a shot, with the library, clip info, markers and an in/out range on the timeline"></p>
+
+## Screenshots
+
+| | |
+| --- | --- |
+| <img src="docs/screenshots/compare.png" alt="A/B wipe between two versions of a shot"><br>**Compare versions** with a draggable wipe, side by side, stacked, blend or difference. | <img src="docs/screenshots/annotate.png" alt="Drawing notes on a frame"><br>**Draw notes** on any frame with pen, shapes, arrows and text. Notes stay with the source frame. |
+| <img src="docs/screenshots/onion.png" alt="Onion skin showing neighbouring frames"><br>**Onion skin** shows the frames either side of the current one, so you can check spacing and arcs. | <img src="docs/screenshots/export.png" alt="Export Range window"><br>**Export a range** as an H.264 MP4 or a GIF at full resolution, with drawings burned in. |
+| <img src="docs/screenshots/compare_side.png" alt="Side-by-side comparison"><br>**Side by side** comparison of two versions. | |
 
 ## Download
 
