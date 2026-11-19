@@ -70,7 +70,7 @@ jobs:
       matrix:
         app: [Frameline, Stillframe]
         target:
-          - { runner: macos-14, arch: AppleSilicon }
+          - { runner: macos-26, arch: AppleSilicon }
           - { runner: macos-15-intel, arch: Intel }
     runs-on: ${{ matrix.target.runner }}
     steps:
