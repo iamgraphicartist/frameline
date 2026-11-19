@@ -2,4 +2,7 @@ PySide6-Essentials>=6.7
 av>=13
 numpy
 sounddevice
+Pillow>=11
+pillow-heif
+Send2Trash
 pyinstaller>=6

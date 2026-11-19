@@ -38,7 +38,8 @@ def _cells():
     return out
 
 
-def render_master():
+def begin_tile():
+    """Transparent master canvas with the dark rounded tile and its shadow; returns (image, painter)."""
     img = QImage(S, S, QImage.Format.Format_ARGB32_Premultiplied)
     img.fill(Qt.GlobalColor.transparent)
     p = QPainter(img)
@@ -56,6 +57,11 @@ def render_master():
     p.setBrush(Qt.BrushStyle.NoBrush)
     p.setPen(QColor(255, 255, 255, 14))
     p.drawRoundedRect(QRectF(BX + 2, BY + 2, BW - 4, BH - 4), RAD - 2, RAD - 2)
+    return img, p
+
+
+def render_master():
+    img, p = begin_tile()
 
     # mosaic play triangle (optically centred: nudged right of the tile centre)
     cells = _cells()
@@ -78,35 +84,35 @@ def render_master():
     return img
 
 
-_MASTER = None
+_MASTERS = {}
 
 
-def render(size):
-    global _MASTER
-    if _MASTER is None:
-        _MASTER = render_master()
-    img = _MASTER
+def render(size, master_fn=None):
+    master_fn = master_fn or render_master
+    if master_fn not in _MASTERS:
+        _MASTERS[master_fn] = master_fn()
+    img = _MASTERS[master_fn]
     while img.width() // 2 >= size * 1.5:
         img = img.scaled(img.width() // 2, img.height() // 2, Qt.AspectRatioMode.KeepAspectRatio,
                          Qt.TransformationMode.SmoothTransformation)
     return img.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
 
-def qicon():
+def qicon(master_fn=None):
     ic = QIcon()
     for s in (16, 24, 32, 48, 64, 128, 256):
-        ic.addPixmap(QPixmap.fromImage(render(s)))
+        ic.addPixmap(QPixmap.fromImage(render(s, master_fn)))
     return ic
 
 
-def save_ico(path, sizes=(16, 20, 24, 32, 40, 48, 64, 128, 256)):
+def save_ico(path, sizes=(16, 20, 24, 32, 40, 48, 64, 128, 256), master_fn=None):
     """Write a multi-resolution .ico with PNG-compressed entries."""
     blobs = []
     for s in sizes:
         ba = QByteArray()
         buf = QBuffer(ba)
         buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        render(s).save(buf, "PNG")
+        render(s, master_fn).save(buf, "PNG")
         buf.close()
         blobs.append((s, bytes(ba.data())))
     out = struct.pack("<HHH", 0, 1, len(blobs))

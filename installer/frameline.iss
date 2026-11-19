@@ -41,7 +41,6 @@ Name: "{userdesktop}\Frameline"; Filename: "{app}\Frameline.exe"; Tasks: desktop
 [Run]
 Filename: "{app}\Frameline.exe"; Parameters: "--register"; Tasks: assoc; Flags: runhidden waituntilterminated
 Filename: "{app}\Frameline.exe"; Description: "Launch Frameline"; Flags: nowait postinstall skipifsilent
-Filename: "ms-settings:defaultapps?registeredAppUser=Frameline"; Description: "Make Frameline my default video player (opens Settings)"; Tasks: assoc; Flags: shellexec postinstall skipifsilent unchecked
 
 [UninstallRun]
 Filename: "{app}\Frameline.exe"; Parameters: "--unregister"; Flags: runhidden waituntilterminated; RunOnceId: "Unregister"
