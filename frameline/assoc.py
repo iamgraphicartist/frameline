@@ -14,6 +14,7 @@ SESSION_EXT = ".flsession"
 PROGID = "Frameline.Media"
 APP_NAME = "Frameline"
 EXPLORER_EXTS = r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts"
+TOASTS = r"Software\Microsoft\Windows\CurrentVersion\ApplicationAssociationToasts"
 
 
 def _command():
@@ -56,6 +57,10 @@ def register_windows():
         # Explorer's per-user list is what the "Select a default app" picker reads
         with winreg.CreateKeyEx(C, EXPLORER_EXTS + rf"\{e}\OpenWithProgids", 0, winreg.KEY_WRITE) as k:
             winreg.SetValueEx(k, PROGID, 0, winreg.REG_NONE, b"")
+        # the Settings picker only lists handlers Windows has already "announced" for the type
+        with winreg.CreateKeyEx(C, TOASTS, 0, winreg.KEY_WRITE) as k:
+            for name in (f"{PROGID}_{e}", rf"Applications\Frameline.exe_{e}"):
+                winreg.SetValueEx(k, name, 0, winreg.REG_DWORD, 0)
     setv(r"Software\RegisteredApplications", APP_NAME, caps)
     # .flsession files are ours alone: claim them outright
     setv(rf"Software\Classes\{SESSION_EXT}", "", PROGID)
@@ -105,6 +110,12 @@ def unregister_windows():
             try:
                 with winreg.OpenKey(C, path, 0, winreg.KEY_WRITE) as k:
                     winreg.DeleteValue(k, PROGID)
+            except OSError:
+                pass
+        for name in (f"{PROGID}_{e}", rf"Applications\Frameline.exe_{e}"):
+            try:
+                with winreg.OpenKey(C, TOASTS, 0, winreg.KEY_WRITE) as k:
+                    winreg.DeleteValue(k, name)
             except OSError:
                 pass
     try:
