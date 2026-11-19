@@ -480,7 +480,8 @@ class MainWindow(QMainWindow):
         hb.addStretch(1)
         lay.addLayout(hb)
         lay.addWidget(section("Export"))
-        for text, fn in (("Save Snapshot…", self.save_snapshot), ("Copy Frame", self.copy_frame),
+        for text, fn in (("Export Range as Video or GIF…", self.export_range),
+                         ("Save Snapshot…", self.save_snapshot), ("Copy Frame", self.copy_frame),
                          ("Export Annotated Frames…", self.export_annotations),
                          ("Clear All Annotations", self.clear_all_annotations)):
             b = QPushButton(text)
@@ -658,6 +659,7 @@ class MainWindow(QMainWindow):
         fm.addSeparator()
         self._act(fm, "Save Snapshot…", "Ctrl+E", self.save_snapshot)
         self._act(fm, "Copy Frame", "Ctrl+Shift+C", self.copy_frame)
+        self._act(fm, "Export Range as Video or GIF…", "Ctrl+Shift+E", self.export_range)
         self._act(fm, "Export Annotated Frames…", None, self.export_annotations)
         em = m.addMenu("Edit")
         self._act(em, "Undo", "Ctrl+Z", self.undo)
@@ -923,6 +925,8 @@ class MainWindow(QMainWindow):
         m = QMenu(self)
         m.addAction("Import Media…", self.import_dialog)
         m.addAction("Clear In/Out", self.clear_range)
+        m.addSeparator()
+        m.addAction("Export Range as Video or GIF…", self.export_range)
         m.exec(gpos)
 
     def _range_to_clip(self, i):
@@ -1849,6 +1853,16 @@ class MainWindow(QMainWindow):
         if img is not None:
             QGuiApplication.clipboard().setImage(img)
             self.toast("Copied")
+
+    def export_range(self):
+        if not self.project.total():
+            QMessageBox.information(self, APP, "Add some media to the timeline first.")
+            return
+        self.pause()
+        lo, hi = self._range()
+        has_range = self.in_pt > 0 or self.out_pt >= 0
+        from .exportdialog import ExportDialog
+        ExportDialog(self, lo, hi, has_range).exec()
 
     def export_annotations(self):
         if not self.project.annotations:
