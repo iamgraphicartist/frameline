@@ -31,12 +31,25 @@ A fast, simple photo viewer built on the same design as Frameline. Open any phot
 
 | | |
 | --- | --- |
-| <img src="docs/screenshots/stillframe_markup.png" alt="Drawing on a photo in Stillframe"><br>**Markup:** sketch, draw lines, arrows, boxes and circles, or add text, then **Copy** the result to the clipboard or **Save…** a marked-up copy. The original photo is never changed. | **Formats:** JPEG, PNG, HEIC/HEIF (iPhone), AVIF, WebP, GIF (animated), TIFF, BMP, SVG, PSD, EXR and more.<br><br>**Viewing:** fit, 100% and smooth zoom to the cursor, rotation that follows the camera, wide-gamut colour converted to your screen, filmstrip, slideshow and full screen.<br><br>**Info:** dimensions, file size, camera, lens and exposure, and a live RGB histogram.<br><br>**Files:** rotate and save, copy, save a copy, show in folder, and delete to the Recycle Bin or Trash. |
+| <img src="docs/screenshots/stillframe_adjust.png" alt="Levels and Curves in Stillframe"><br>**Levels and Curves:** set black, white and midtone points, or shape tone curves for RGB or each colour channel separately, with live histograms and before/after compare. | <img src="docs/screenshots/stillframe_markup.png" alt="Drawing on a photo in Stillframe"><br>**Markup:** sketch, draw lines, arrows, boxes and circles, or add text, then **Copy** the result to the clipboard or **Save…** a marked-up copy. The original photo is never changed. |
+
+**Editing quality:**
+- **Colour:** adjustments work on the photo's own pixels and colour profile (sRGB, Display P3, Adobe RGB), and saved files keep that profile and the camera EXIF.
+- **Bit depth:** 16-bit PNG and TIFF files stay 16-bit.
+- **JPEG:** saved at quality 95 with full 4:4:4 colour.
+
+**Paste:** press **Ctrl+V** to open an image from the clipboard, such as a screenshot. You can then adjust it, mark it up, copy it or save it.
+
+| | |
+| --- | --- |
+| **Formats:** JPEG, PNG, HEIC/HEIF (iPhone), AVIF, WebP, GIF (animated), TIFF, BMP, SVG, PSD, EXR and more.<br><br>**Viewing:** fit, 100% and smooth zoom to the cursor, rotation that follows the camera, wide-gamut colour converted to your screen, filmstrip, slideshow and full screen.<br><br>**Info:** dimensions, file size, camera, lens and exposure, and a live RGB histogram.<br><br>**Files:** rotate and save, copy, save a copy, show in folder, and delete to the Recycle Bin or Trash. |
 
 Stillframe's shortcuts:
 - **Browse:** ← →
 - **Zoom:** double-click switches between Fit and 100%.
+- **Adjust (Levels and Curves):** **Ctrl+M**. Hold **\\** to compare with the original.
 - **Markup:** **M**, then **Ctrl+C** to copy or **Ctrl+S** to save.
+- **Paste an image:** **Ctrl+V**.
 - **Slideshow:** **F5**.
 - **Full list:** press **F1**.
 

@@ -1,9 +1,12 @@
 """Stillframe main window."""
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+from datetime import datetime
 
-from PySide6.QtCore import Qt, QTimer, QSettings, QPoint, QFileSystemWatcher, QSize
+from PySide6.QtCore import Qt, QTimer, QSettings, QPoint, QFileSystemWatcher, QSize, QStandardPaths
 from PySide6.QtGui import QAction, QKeySequence, QShortcut, QGuiApplication, QIcon
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QMenu, QFileDialog,
                                QMessageBox, QApplication, QDialog, QPushButton, QCheckBox, QSlider,
@@ -17,6 +20,8 @@ from . import __version__
 from .loader import ImageCache, ThumbLoader, list_folder, is_image, read_info, is_animated, IMAGE_EXTS
 from .view import PhotoView
 from .panels import Filmstrip, InfoPanel
+from .adjust import AdjustEngine, Adjustments, load_native, render_full, write as write_image, default_ext, is_deep
+from .adjustpanel import AdjustPanel
 
 APP = "Stillframe"
 REPO_URL = "https://github.com/iamgraphicartist/frameline"
@@ -56,6 +61,19 @@ class MainWindow(QMainWindow):
         self.markup_undo = {}     # path -> list of previous stroke lists
         self.markup_redo = {}
         self.markup_unsaved = set()
+        self.adjust = {}          # path -> Adjustments (levels and curves)
+        self.adjust_undo = {}
+        self.adjust_redo = {}
+        self.adjust_unsaved = set()
+        self._adj_last = None     # committed state of the current photo's adjustments (for undo)
+        self.engine = AdjustEngine(self)
+        self.engine.nativeReady.connect(self._on_native)
+        self.engine.fullReady.connect(self._on_full)
+        self._adj_preview = QTimer(self, singleShot=True, interval=0, timeout=self._render_preview)
+        self._adj_full = QTimer(self, singleShot=True, interval=250, timeout=self._render_full)
+        self.pasted = set()       # clipboard images (kept in a temporary folder until saved)
+        self.pasted_saved = set()
+        self._paste_dir = None
 
         self._build()
         self._actions()
@@ -126,7 +144,9 @@ class MainWindow(QMainWindow):
         self.btn_more = icon_button("more", "Menu")
         self.btn_markup = icon_button("pen", "Markup: draw and write on the photo (M)", checkable=True)
         self.btn_markup.toggled.connect(self._toggle_markup)
-        for b in (self.btn_markup, self.btn_zoom_out, self.btn_zoom_in, self.btn_fit, self.btn_rot, self.btn_rot_r,
+        self.btn_adjust = icon_button("sliders", "Adjust: Levels and Curves (Ctrl+M)", checkable=True)
+        self.btn_adjust.toggled.connect(self._toggle_adjust)
+        for b in (self.btn_markup, self.btn_adjust, self.btn_zoom_out, self.btn_zoom_in, self.btn_fit, self.btn_rot, self.btn_rot_r,
                   self.btn_show, self.btn_trash):
             h.addWidget(b)
         sep = QWidget()
@@ -152,6 +172,15 @@ class MainWindow(QMainWindow):
         body.addWidget(self.view, 1)
         self.info = InfoPanel()
         body.addWidget(self.info)
+        self.adjust_panel = AdjustPanel()
+        self.adjust_panel.hide()
+        self.adjust_panel.changed.connect(self._adj_changed)
+        self.adjust_panel.committed.connect(self._adj_committed)
+        self.adjust_panel.compareHeld.connect(self._compare)
+        self.adjust_panel.copyRequested.connect(self.copy_image)
+        self.adjust_panel.saveRequested.connect(self.save_edited)
+        self.adjust_panel.resetRequested.connect(self.adjust_reset)
+        body.addWidget(self.adjust_panel)
         v.addLayout(body, 1)
         self.strip = Filmstrip()
         self.strip.activated.connect(self.show_index)
@@ -303,31 +332,301 @@ class MainWindow(QMainWindow):
             self._markup_set([])
 
     def save_markup(self):
+        self.save_edited()
+
+    # ================================================================== adjust (levels / curves)
+    def _adj(self, p=None):
+        p = p or self._current()
+        return self.adjust.get(p) if p else None
+
+    def _has_adj(self, p=None):
+        a = self._adj(p)
+        return a is not None and not a.is_identity()
+
+    def _toggle_adjust(self, on):
+        if on:
+            if self.slideshow.isActive():
+                self.slideshow.stop()
+            self.info.hide()
+            self.adjust_panel.show()
+            self._adjust_load()
+        else:
+            self.adjust_panel.hide()
+            self.info.setVisible(self.btn_info.isChecked())
+            if self.info.isVisible():
+                self._update_info(self.view.img if not self.view.placeholder else None)
+
+    def _adjust_load(self):
+        """Point the panel and the engine at the current photo."""
         p = self._current()
-        img = self.view.rendered_image()
-        if not p or img is None or self.view.placeholder:
+        if not p:
+            self.adjust_panel.set_adjustments(Adjustments())
+            self.adjust_panel.set_enabled(False)
             return
-        base, ext = os.path.splitext(os.path.basename(p))
-        jpg = ext.lower() in (".jpg", ".jpeg", ".heic", ".heif") and not img.hasAlphaChannel()
-        out_ext = ".jpg" if jpg else ".png"
-        default = os.path.join(self.settings.value("markup_dir", os.path.dirname(p)), f"{base} markup{out_ext}")
-        filters = "JPEG (*.jpg);;PNG (*.png)" if jpg else "PNG (*.png);;JPEG (*.jpg)"
-        path, _ = QFileDialog.getSaveFileName(self, "Save Photo with Markup", default, filters)
+        adj = self.adjust.get(p)
+        if adj is None:
+            adj = self.adjust[p] = Adjustments()
+        self._adj_last = adj.copy()
+        ready = self.engine.ready(p)
+        self.adjust_panel.set_adjustments(adj, self.engine.hists if ready else None)
+        self.adjust_panel.set_enabled(ready)
+        if not ready:
+            self.engine.load(p, self._proxy_side())
+
+    def _proxy_side(self):
+        dpr = self.devicePixelRatioF()
+        return int(max(1400, min(2600, max(self.view.width(), self.view.height()) * dpr * 1.1)))
+
+    def _on_native(self, path):
+        if path != self._current():
+            return
+        if self.adjust_panel.isVisible():
+            self.adjust_panel.set_hists(self.engine.hists)
+            self.adjust_panel.set_enabled(True)
+        self._refresh_adjusted()
+
+    def _refresh_adjusted(self):
+        """Re-show the current photo's adjustments (after navigation or a fresh decode)."""
+        p = self._current()
+        if not p or not self._has_adj(p):
+            return
+        if not self.engine.ready(p):
+            self.engine.load(p, self._proxy_side())
+            return
+        if self.view.placeholder or self.view.img is None:
+            return
+        self._render_preview()
+        self._adj_full.start()
+
+    def _adj_changed(self):
+        p = self._current()
+        if not p or not self.engine.ready(p):
+            return
+        self._adj_preview.start()
+        self._adj_full.start()
+
+    def _render_preview(self):
+        p = self._current()
+        if not p or not self.engine.ready(p) or self.view.img is None:
+            return
+        adj = self._adj(p)
+        if adj is None or adj.is_identity():
+            self.view.set_adjusted(None)
+        else:
+            self.view.set_adjusted(self.engine.preview(adj))
+
+    def _render_full(self):
+        p = self._current()
+        if p and self.engine.ready(p) and self._has_adj(p):
+            self.engine.full_async(self._adj(p))
+
+    def _on_full(self, path, gen, img):
+        if path == self._current() and gen == self.engine.gen and self._has_adj(path):
+            self.view.set_adjusted(img, full=True)
+
+    def _adj_committed(self):
+        p = self._current()
+        adj = self._adj(p)
+        if adj is None or self._adj_last is None or adj == self._adj_last:
+            return
+        self.adjust_undo.setdefault(p, []).append(self._adj_last)
+        self.adjust_redo[p] = []
+        self._adj_last = adj.copy()
+        self._mark_adj(p)
+
+    def _mark_adj(self, p):
+        if self._has_adj(p):
+            self.adjust_unsaved.add(p)
+        else:
+            self.adjust_unsaved.discard(p)
+
+    def _adj_restore(self, state):
+        p = self._current()
+        adj = self.adjust[p] = state.copy()
+        self._adj_last = adj.copy()
+        self.adjust_panel.set_adjustments(adj, self.engine.hists if self.engine.ready(p) else None)
+        self._mark_adj(p)
+        self._adj_changed()
+
+    def adjust_undo_step(self):
+        p = self._current()
+        stack = self.adjust_undo.get(p) if p else None
+        if stack:
+            self.adjust_redo.setdefault(p, []).append(self._adj(p).copy())
+            self._adj_restore(stack.pop())
+
+    def adjust_redo_step(self):
+        p = self._current()
+        stack = self.adjust_redo.get(p) if p else None
+        if stack:
+            self.adjust_undo.setdefault(p, []).append(self._adj(p).copy())
+            self._adj_restore(stack.pop())
+
+    def adjust_reset(self):
+        p = self._current()
+        if p and self._has_adj(p):
+            self.adjust_undo.setdefault(p, []).append(self._adj(p).copy())
+            self.adjust_redo[p] = []
+            self._adj_restore(Adjustments())
+
+    def _undo(self):
+        if self.adjust_panel.isVisible():
+            self.adjust_undo_step()
+        else:
+            self.markup_undo_step()
+
+    def _redo(self):
+        if self.adjust_panel.isVisible():
+            self.adjust_redo_step()
+        else:
+            self.markup_redo_step()
+
+    def _compare(self, on):
+        if self.view.show_original == on:
+            return
+        self.view.show_original = on
+        self.view._scaled = None
+        if on and self._has_adj():
+            self.view.message = "Original"
+        elif not on and self.view.message == "Original":
+            self.view.message = ""
+        self.view.update()
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Backslash and not e.isAutoRepeat():
+            self._compare(True)
+            return
+        super().keyPressEvent(e)
+
+    def keyReleaseEvent(self, e):
+        if e.key() == Qt.Key.Key_Backslash and not e.isAutoRepeat():
+            self._compare(False)
+            return
+        super().keyReleaseEvent(e)
+
+    def _ensure_full_adjusted(self):
+        """Make sure the view holds the full-resolution adjusted image (for copying)."""
+        p = self._current()
+        if not self._has_adj(p) or self.view.adjusted_img is not None:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            if not self.engine.ready(p):
+                self.engine.path, self.engine.native = p, load_native(p)
+            self.view.set_adjusted(self.engine.full_now(self._adj(p)), full=True)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    # ================================================================== saving edits
+    def _save_dir(self, p):
+        pictures = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.PicturesLocation)
+        if p in self.pasted:
+            return self.settings.value("paste_dir", pictures)
+        return os.path.dirname(p)
+
+    def save_edited(self):
+        """Full-quality save of adjustments + markup + rotation, decoded fresh from the original file."""
+        p = self._current()
+        if not p or self.view.img is None or self.view.placeholder:
+            return
+        adj = self._adj(p)
+        has_adj = adj is not None and not adj.is_identity()
+        strokes = self.markup.get(p, [])
+        if not has_adj and not strokes and not self.view.rotation and p not in self.pasted:
+            self._flash("Nothing to save yet", 1400)
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            native = self.engine.native if self.engine.ready(p) else load_native(p)
+            out = render_full(native, adj if has_adj else None, strokes, self.view.rotation)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, APP, f"Couldn't prepare the image:\n\n{e}")
+            return
+        QApplication.restoreOverrideCursor()
+        base = os.path.splitext(os.path.basename(p))[0]
+        ext = default_ext(p, out)
+        if p in self.pasted:
+            suffix = ""
+        elif has_adj:
+            suffix = " edited"
+        elif strokes:
+            suffix = " markup"
+        else:
+            suffix = " rotated"
+        deep = is_deep(out)
+        names = {".jpg": "JPEG (*.jpg)", ".png": "PNG 16-bit (*.png)" if deep else "PNG (*.png)",
+                 ".tif": "TIFF 16-bit (*.tif)" if deep else "TIFF (*.tif)", ".webp": "WebP (*.webp)"}
+        order = [ext] + [k for k in names if k != ext]
+        filters = ";;".join(names[k] for k in order)
+        default = os.path.join(self._save_dir(p), base + suffix + ext)
+        path, chosen = QFileDialog.getSaveFileName(self, "Save Edited Photo", default, filters)
         if not path:
             return
         if not os.path.splitext(path)[1]:
-            path += out_ext
-        if os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(p)):
-            r = QMessageBox.question(self, APP, "Replace the original photo with the marked-up version?\n\n"
+            path += next((k for k, v in names.items() if v == chosen), ext)
+        replacing = os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(p))
+        if replacing and p not in self.pasted:
+            r = QMessageBox.question(self, APP, "Replace the original photo with the edited version?\n\n"
                                      "The original can't be recovered afterwards.")
             if r != QMessageBox.StandardButton.Yes:
                 return
-        if not img.save(path, quality=95):
-            QMessageBox.warning(self, APP, "Couldn't save the image.")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            write_image(out, path, None if p in self.pasted else p)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, APP, f"Couldn't save the image:\n\n{e}")
             return
-        self.settings.setValue("markup_dir", os.path.dirname(path))
+        QApplication.restoreOverrideCursor()
+        if p in self.pasted:
+            self.settings.setValue("paste_dir", os.path.dirname(path))
+            self.pasted_saved.add(p)
         self.markup_unsaved.discard(p)
-        self._flash(f"Saved {os.path.basename(path)}", 1600)
+        self.adjust_unsaved.discard(p)
+        if replacing:
+            # the file on disk now holds the edit: start fresh from it
+            for d in (self.markup, self.markup_undo, self.markup_redo, self.adjust, self.adjust_undo, self.adjust_redo):
+                d.pop(p, None)
+            self.engine.forget()
+            self.cache.drop(p)
+            self.thumbs.thumbs.pop(p, None)
+            self.thumbs.request([p])
+            i, self.index = self.index, -1
+            self.show_index(i, fade=False)
+            if self.adjust_panel.isVisible():
+                self._adjust_load()
+        depth = "16-bit " if deep and os.path.splitext(path)[1].lower() in (".png", ".tif", ".tiff") else ""
+        self._flash(f"Saved {depth}{os.path.basename(path)}", 1800)
+
+    # ================================================================== paste
+    def paste(self):
+        cb = QGuiApplication.clipboard()
+        md = cb.mimeData()
+        if md is not None and md.hasUrls():
+            files = [u.toLocalFile() for u in md.urls() if u.isLocalFile()]
+            files = [f for f in files if os.path.isdir(f) or is_image(f)]
+            if files:
+                self.open_paths(files)
+                return
+        img = cb.image() if md is not None and md.hasImage() else None
+        if img is None or img.isNull():
+            self._flash("There's no image on the clipboard", 1500)
+            return
+        if self._paste_dir is None or not os.path.isdir(self._paste_dir):
+            self._paste_dir = tempfile.mkdtemp(prefix="Stillframe-pasted-")
+        name = f"Pasted image {datetime.now():%Y-%m-%d at %H.%M.%S}"
+        path = os.path.join(self._paste_dir, name + ".png")
+        k = 2
+        while os.path.exists(path):
+            path = os.path.join(self._paste_dir, f"{name} {k}.png")
+            k += 1
+        if not img.save(path, "PNG"):
+            self._flash("Couldn't paste the image", 1500)
+            return
+        self.pasted.add(path)
+        self.open_paths([path])
+        self._flash("Pasted · edit it, then Save… or Copy", 1800)
 
     def _act(self, menu, text, shortcut, fn, checkable=False):
         a = QAction(text, self)
@@ -347,15 +646,21 @@ class MainWindow(QMainWindow):
         self._act(fm, "Open…", "Ctrl+O", self.open_dialog)
         self._act(fm, "Open Folder…", "Ctrl+Shift+O", self.open_folder_dialog)
         fm.addSeparator()
+        self._act(fm, "Paste Image", "Ctrl+V", self.paste)
         self._act(fm, "Copy Image", "Ctrl+C", self.copy_image)
         self._act(fm, "Copy File Path", "Ctrl+Shift+C", self.copy_path)
         self._act(fm, "Save", "Ctrl+S", self._save_shortcut)
-        self._act(fm, "Save Photo with Markup…", None, self.save_markup)
+        self._act(fm, "Save Edited Photo…", None, self.save_edited)
         self._act(fm, "Save Rotation", None, self.save_rotation)
         self._act(fm, "Save a Copy As…", "Ctrl+Shift+S", self.save_copy)
         self._act(fm, "Show in Explorer" if sys.platform == "win32" else "Show in Finder", "Ctrl+E", self.reveal)
         self._act(fm, "Move to Recycle Bin" if sys.platform == "win32" else "Move to Trash", "Delete",
                   self.delete_current)
+        em = m.addMenu("Edit")
+        self._act(em, "Adjust Levels and Curves", "Ctrl+M", lambda: self.btn_adjust.toggle())
+        self._act(em, "Markup", None, lambda: self.btn_markup.toggle())
+        em.addSeparator()
+        self._act(em, "Reset Adjustments", None, self.adjust_reset)
         vm = m.addMenu("View")
         self._act(vm, "Zoom In", "Ctrl+=", lambda: self.view.zoom_step(1))
         self._act(vm, "Zoom Out", "Ctrl+-", lambda: self.view.zoom_step(-1))
@@ -405,9 +710,9 @@ class MainWindow(QMainWindow):
         key("Escape", self._escape)
         key("Return", self.toggle_fullscreen)
         key("M", lambda: self.btn_markup.toggle())
-        key("Ctrl+Z", self.markup_undo_step)
-        key("Ctrl+Y", self.markup_redo_step)
-        key("Ctrl+Shift+Z", self.markup_redo_step)
+        key("Ctrl+Z", self._undo)
+        key("Ctrl+Y", self._redo)
+        key("Ctrl+Shift+Z", self._redo)
         for k, t in (("P", "pen"), ("L", "line"), ("A", "arrow"), ("R", "rect"), ("O", "ellipse"), ("T", "text"),
                      ("E", "eraser")):
             key(k, lambda t=t: self.set_tool(t) if self.btn_markup.isChecked() else None)
@@ -548,6 +853,13 @@ class MainWindow(QMainWindow):
         if is_animated(path):
             self.view.play_movie(path)
         self.view.strokes = self.markup.get(path, [])
+        self.view.show_original = False
+        if self.adjust_panel.isVisible():
+            self._adjust_load()
+        elif self._has_adj(path):
+            self.engine.load(path, self._proxy_side())
+        if img is not None:
+            self._refresh_adjusted()
         self.strip.set_current(i)
         n = len(self.paths)
         self.cache.want([path] + [self.paths[(i + d) % n] for d in (1, -1, 2, 3, -2) if n > 1])
@@ -568,6 +880,7 @@ class MainWindow(QMainWindow):
             self.view.upgrade_image(img)
         elif self.view.img is None:
             self.view.set_image(img, fade=True)
+        self._refresh_adjusted()
         if is_animated(path):
             self.view.play_movie(path)
         self._update_chrome()
@@ -631,10 +944,14 @@ class MainWindow(QMainWindow):
             info, exif = read_info(path, img)
         except OSError:
             info, exif = None, None
+        if info and path in self.pasted:
+            info["Folder"] = "Pasted from the clipboard" + ("" if path in self.pasted_saved else " · not saved yet")
         self.info.set_info(info, exif)
         self.info.hist.set_image(img if img is not None else self.thumbs.thumbs.get(path))
 
     def _toggle_info(self, on):
+        if on and self.btn_adjust.isChecked():
+            self.btn_adjust.setChecked(False)
         self.info.setVisible(on)
         self.settings.setValue("show_info", "true" if on else "false")
         if on:
@@ -668,12 +985,14 @@ class MainWindow(QMainWindow):
             self.showNormal()
             self.toolbar.show()
             self.strip.setVisible(self.btn_strip.isChecked())
-            self.info.setVisible(self.btn_info.isChecked())
+            self.info.setVisible(self.btn_info.isChecked() and not self.btn_adjust.isChecked())
+            self.adjust_panel.setVisible(self.btn_adjust.isChecked())
             self.slideshow.stop()
         else:
             self.toolbar.hide()
             self.strip.hide()
             self.info.hide()
+            self.adjust_panel.hide()
             self.showFullScreen()
         QTimer.singleShot(50, self.view.set_fit)
 
@@ -701,7 +1020,9 @@ class MainWindow(QMainWindow):
             self.go(1)
 
     def _escape(self):
-        if self.btn_markup.isChecked():
+        if self.btn_adjust.isChecked():
+            self.btn_adjust.setChecked(False)
+        elif self.btn_markup.isChecked():
             self.btn_markup.setChecked(False)
         elif self.isFullScreen():
             self.toggle_fullscreen()
@@ -713,14 +1034,21 @@ class MainWindow(QMainWindow):
         return self.paths[self.index] if 0 <= self.index < len(self.paths) else None
 
     def copy_image(self):
+        if self.view.img is None or self.view.placeholder:
+            return
+        self._ensure_full_adjusted()
         img = self.view.rendered_image()
         if img is not None:
             QGuiApplication.clipboard().setImage(img)
+            p = self._current()
+            parts = []
+            if self._has_adj(p):
+                parts.append("adjustments")
+                self.adjust_unsaved.discard(p)
             if self.view.strokes:
-                self.markup_unsaved.discard(self._current())
-                self._flash("Copied with markup")
-            else:
-                self._flash("Copied")
+                parts.append("markup")
+                self.markup_unsaved.discard(p)
+            self._flash("Copied with " + " and ".join(parts) if parts else "Copied")
 
     def copy_path(self):
         p = self._current()
@@ -770,6 +1098,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP, f"Couldn't move the file to the {bin_name}:\n\n{e}")
             return
         self.cache.drop(p)
+        for d in (self.markup, self.markup_undo, self.markup_redo, self.adjust, self.adjust_undo, self.adjust_redo):
+            d.pop(p, None)
+        self.markup_unsaved.discard(p)
+        self.adjust_unsaved.discard(p)
+        self.pasted.discard(p)
         i = self.index
         self.paths.pop(i)
         self.strip.set_paths(self.paths)
@@ -782,8 +1115,9 @@ class MainWindow(QMainWindow):
         self._flash(f"Moved to {bin_name}")
 
     def _save_shortcut(self):
-        if self.view.strokes:
-            self.save_markup()
+        p = self._current()
+        if self.view.strokes or self._has_adj(p) or p in self.pasted:
+            self.save_edited()
         else:
             self.save_rotation()
 
@@ -792,8 +1126,8 @@ class MainWindow(QMainWindow):
         if not p or self.view.rotation == 0:
             self._flash("Nothing to save: rotate first (Ctrl+L / Ctrl+R)", 1600)
             return
-        if self.markup.get(p):
-            self._flash("Save or clear the markup first", 1600)
+        if self.markup.get(p) or self._has_adj(p):
+            self.save_edited()
             return
         try:
             from .loader import _pil
@@ -859,7 +1193,9 @@ class MainWindow(QMainWindow):
                 ("Delete", "Move to Recycle Bin"), ("M", "Markup: draw and write on the photo"),
                 ("P L A R O T E", "Sketch, line, arrow, rectangle, ellipse, text, eraser"),
                 ("Ctrl+Z / Ctrl+Y", "Undo / redo markup"), ("Ctrl+C", "Copy (includes markup)"),
-                ("Ctrl+S", "Save a copy with markup")]
+                ("Ctrl+S", "Save a copy with your edits"), ("Ctrl+M", "Adjust: Levels and Curves"),
+                ("Hold \\", "Compare with the original while adjusting"),
+                ("Ctrl+V", "Paste an image to view or edit")]
         text = "<table cellspacing=6>" + "".join(f"<tr><td><b>{k}</b></td><td>{v}</td></tr>" for k, v in rows) + "</table>"
         QMessageBox.information(self, "Keyboard Shortcuts", text)
 
@@ -898,15 +1234,25 @@ class MainWindow(QMainWindow):
         d.exec()
 
     def closeEvent(self, e):
-        pending = [q for q in self.markup_unsaved if self.markup.get(q)]
-        if pending:
-            n = len(pending)
-            plural = "s" if n > 1 else ""
-            r = QMessageBox.question(self, APP, f"You have markup on {n} photo{plural} that hasn't been saved or "
-                                     "copied. Quit anyway?")
+        pending = {q for q in self.markup_unsaved if self.markup.get(q)}
+        pending |= {q for q in self.adjust_unsaved if self._has_adj(q)}
+        pasted = {q for q in self.pasted if q not in self.pasted_saved and os.path.exists(q)} - pending
+        if pending or pasted:
+            lines = []
+            if pending:
+                n = len(pending)
+                lines.append(f"{n} photo{'s have' if n > 1 else ' has'} edits that haven't been saved or copied.")
+            if pasted:
+                n = len(pasted)
+                lines.append(f"{n} pasted image{'s' if n > 1 else ''} won't be kept unless you save "
+                             f"{'them' if n > 1 else 'it'}.")
+            r = QMessageBox.question(self, APP, "\n".join(lines) + "\n\nQuit anyway?")
             if r != QMessageBox.StandardButton.Yes:
                 e.ignore()
                 return
+        self.engine.alive = False
+        if self._paste_dir:
+            shutil.rmtree(self._paste_dir, ignore_errors=True)
         self.settings.setValue("geometry", self.saveGeometry())
         self.cache.close()
         self.thumbs.close()

@@ -70,6 +70,7 @@ _P.update({
     "copy": f'<rect {S} x="8" y="8" width="12" height="12" rx="2.5"/><path {S} d="M16 8V6.5A2.5 2.5 0 0 0 13.5 4h-7A2.5 2.5 0 0 0 4 6.5v7A2.5 2.5 0 0 0 6.5 16H8"/>',
     "filmstrip": f'<rect {S} x="3" y="6" width="18" height="12" rx="2.5"/><path {S} d="M8 6v12M16 6v12"/>',
     "heart": f'<path {S} d="M12 20s-7.5-4.6-7.5-10.1A4.4 4.4 0 0 1 12 7.2a4.4 4.4 0 0 1 7.5 2.7C19.5 15.4 12 20 12 20z"/>',
+    "sliders": f'<path {S} d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle {S} cx="15" cy="7" r="2.2"/><circle {S} cx="9" cy="17" r="2.2"/>',
     "heart_fill": f'<path {F} d="M12 20s-7.5-4.6-7.5-10.1A4.4 4.4 0 0 1 12 7.2a4.4 4.4 0 0 1 7.5 2.7C19.5 15.4 12 20 12 20z"/>',
 })
 

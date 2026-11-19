@@ -67,6 +67,10 @@ class PhotoView(QWidget):
         self.pen_px = 4.0            # stroke width in screen pixels at the time of drawing
         self.strokes = []
         self._live = None
+        # adjustments (levels / curves)
+        self.adj_pix = None          # adjusted preview (any resolution; drawn into the image rect)
+        self.adjusted_img = None     # full-resolution adjusted image, sRGB (for copy)
+        self.show_original = False   # "Compare" held
 
     # ------------------------------------------------------------------ content
     def set_image(self, img, placeholder=False, fade=True, keep_view=False):
@@ -79,6 +83,8 @@ class PhotoView(QWidget):
         self.pix = QPixmap.fromImage(img) if img is not None and not img.isNull() else None
         self.placeholder = placeholder
         self._scaled = None
+        self.adj_pix = None
+        self.adjusted_img = None
         if not keep_view:
             self.rotation = 0
             self.fit = True
@@ -98,6 +104,8 @@ class PhotoView(QWidget):
         self.pix = QPixmap.fromImage(img)
         self.placeholder = False
         self._scaled = None
+        self.adj_pix = None
+        self.adjusted_img = None
         self._apply_fit()
         self.update()
 
@@ -253,6 +261,22 @@ class PhotoView(QWidget):
         self._hud_until = self._clock.elapsed() + 900
         self._hud_timer.start(950)
 
+    def set_adjusted(self, img, full=False):
+        """Show an adjusted version (None restores the original). full=True marks a full-resolution result."""
+        if img is None or img.isNull():
+            self.adj_pix = None
+            self.adjusted_img = None
+        else:
+            self.adj_pix = QPixmap.fromImage(img)
+            self.adjusted_img = img if full else None
+        self._scaled = None
+        self.update()
+
+    def _shown(self):
+        if self.adj_pix is not None and not self.show_original:
+            return self.adj_pix
+        return self.pix
+
     # ------------------------------------------------------------------ painting
     def _bg_color(self):
         return qc("viewer")
@@ -264,10 +288,11 @@ class PhotoView(QWidget):
             return
         w = max(1, round(self.img.width() * self.scale))
         h = max(1, round(self.img.height() * self.scale))
-        key = (w, h, self.pix.cacheKey())
+        src = self._shown()
+        key = (w, h, src.cacheKey())
         if self._scaled and self._scaled[0] == key:
             return
-        self._scaled = (key, self.pix.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio,
+        self._scaled = (key, src.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio,
                                              Qt.TransformationMode.SmoothTransformation))
         self.update()
 
@@ -303,15 +328,17 @@ class PhotoView(QWidget):
         p.rotate(self.rotation)
         iw, ih = self.img.width() * self.scale, self.img.height() * self.scale
         target = QRectF(-iw / 2, -ih / 2, iw, ih)
+        src = self._shown()
         if self.scale >= 1.0:
             # pixel-peeping: crisp nearest-neighbour above 200 %, smooth below
-            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self.scale < 2.0)
-            p.drawPixmap(target, self.pix, QRectF(self.pix.rect()))
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self.scale < 2.0 or src.width() != self.pix.width())
+            p.drawPixmap(target, src, QRectF(src.rect()))
         else:
-            if self._scaled is None or self._scaled[0][:2] != (max(1, round(self.img.width() * self.scale)),
-                                                               max(1, round(self.img.height() * self.scale))):
+            if self._scaled is None or self._scaled[0] != (max(1, round(self.img.width() * self.scale)),
+                                                           max(1, round(self.img.height() * self.scale)),
+                                                           src.cacheKey()):
                 p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-                p.drawPixmap(target, self.pix, QRectF(self.pix.rect()))
+                p.drawPixmap(target, src, QRectF(src.rect()))
                 if not self._refine.isActive():
                     self._refine.start()
             else:
@@ -489,7 +516,7 @@ class PhotoView(QWidget):
         """The image with its current rotation applied (for copy / save)."""
         if self.img is None:
             return None
-        img = self.img
+        img = self.adjusted_img if self.adjusted_img is not None else self.img
         if self.strokes:
             img = img.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied if img.hasAlphaChannel()
                                       else QImage.Format.Format_RGB32)
